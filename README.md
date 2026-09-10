@@ -4,8 +4,8 @@ Plug in a camera SD card on Windows and the photos move themselves into a dated
 library folder. Nothing to click.
 
 ```
-Canon  ->  %USERPROFILE%\Pictures\Canon\2026\Sep-10\
-GoPro  ->  %USERPROFILE%\Pictures\GoPro\2026\Sep-06\G001\
+Canon  ->  %USERPROFILE%\CameraImports\Canon\2026\Sep-10\
+GoPro  ->  %USERPROFILE%\CameraImports\GoPro\2026\Sep-06\G001\
 ```
 
 It is a background watcher plus a verified-move engine, written in Windows
@@ -43,8 +43,20 @@ cd camera-card-importer
 ```
 
 That writes a launcher to your Startup folder and starts the watcher immediately —
-no logout required. Defaults put Canon media in `%USERPROFILE%\Pictures\Canon`
-and GoPro in `%USERPROFILE%\Pictures\GoPro`.
+no logout required. Defaults put Canon media in `%USERPROFILE%\CameraImports\Canon`
+and GoPro in `%USERPROFILE%\CameraImports\GoPro`.
+
+> **Why not `Pictures\`?** An earlier version imported into
+> `%USERPROFILE%\Pictures\Canon`, which was a mistake worth explaining. When the
+> Pictures known folder is redirected to OneDrive — the default on many Windows 11
+> installs — `%USERPROFILE%\Pictures` is a *different, ordinary* directory from the
+> one Windows calls "Pictures". Imports landing there are invisible in Explorer's
+> sidebar, in the Photos app, and in every "open Pictures" dialog, because all of
+> those follow the known folder to OneDrive. Worse, a desktop shortcut to that path
+> silently opens the OneDrive folder instead: a `.lnk` to a known-folder path stores
+> a folder ID that takes precedence over the literal string it was given.
+> Importing into a directory that shadows a known folder is a trap. `CameraImports\`
+> has no such collision. Point `-CanonRoot`/`-GoProRoot` anywhere you like.
 
 To remove it:
 

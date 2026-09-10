@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Background watcher: imports camera media whenever a card or USB drive appears.
 
@@ -17,8 +17,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $CanonRoot = (Join-Path $env:USERPROFILE 'Pictures\Canon'),
-    [string] $GoProRoot = (Join-Path $env:USERPROFILE 'Pictures\GoPro'),
+    [string] $CanonRoot = (Join-Path $env:USERPROFILE 'CameraImports\Canon'),
+    [string] $GoProRoot = (Join-Path $env:USERPROFILE 'CameraImports\GoPro'),
     [switch] $KeepOriginals,
     [switch] $KeepProxies,
     [switch] $FlatGroups,

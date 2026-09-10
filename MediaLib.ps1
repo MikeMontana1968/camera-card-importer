@@ -1,4 +1,4 @@
-﻿<#
+<#
     MediaLib.ps1 -- metadata readers and verified-copy helpers shared by the
     camera import tools. Dot-source it; it defines functions and nothing else.
 

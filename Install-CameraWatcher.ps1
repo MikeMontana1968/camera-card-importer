@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Installs (or removes) the camera import watcher as a per-user startup item.
 
@@ -18,8 +18,8 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $CanonRoot = (Join-Path $env:USERPROFILE 'Pictures\Canon'),
-    [string] $GoProRoot = (Join-Path $env:USERPROFILE 'Pictures\GoPro'),
+    [string] $CanonRoot = (Join-Path $env:USERPROFILE 'CameraImports\Canon'),
+    [string] $GoProRoot = (Join-Path $env:USERPROFILE 'CameraImports\GoPro'),
     [switch] $KeepOriginals,
     [switch] $KeepProxies,
     [switch] $FlatGroups,

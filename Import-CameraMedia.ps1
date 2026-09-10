@@ -1,10 +1,10 @@
-﻿<#
+<#
 .SYNOPSIS
     Moves camera media off removable drives into a dated library, per vendor.
 
 .DESCRIPTION
-    Canon  -> %USERPROFILE%\Pictures\Canon\<yyyy>\<Mmm-dd>
-    GoPro  -> %USERPROFILE%\Pictures\GoPro\<yyyy>\<Mmm-dd>[\<set>]
+    Canon  -> %USERPROFILE%\CameraImports\Canon\<yyyy>\<Mmm-dd>
+    GoPro  -> %USERPROFILE%\CameraImports\GoPro\<yyyy>\<Mmm-dd>[\<set>]
 
     A card is first identified from files in its root (cheap, and for GoPro it
     names the exact model). That identity classifies files that carry no
@@ -28,8 +28,8 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string[]] $Drive,
-    [string]   $CanonRoot = (Join-Path $env:USERPROFILE 'Pictures\Canon'),
-    [string]   $GoProRoot = (Join-Path $env:USERPROFILE 'Pictures\GoPro'),
+    [string]   $CanonRoot = (Join-Path $env:USERPROFILE 'CameraImports\Canon'),
+    [string]   $GoProRoot = (Join-Path $env:USERPROFILE 'CameraImports\GoPro'),
     [switch]   $KeepOriginals,
     [switch]   $FlatGroups,
     [switch]   $KeepProxies,
