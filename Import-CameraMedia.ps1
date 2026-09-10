@@ -1,0 +1,448 @@
+﻿<#
+.SYNOPSIS
+    Moves camera media off removable drives into a dated library, per vendor.
+
+.DESCRIPTION
+    Canon  -> %USERPROFILE%\Pictures\Canon\<yyyy>\<Mmm-dd>
+    GoPro  -> %USERPROFILE%\Pictures\GoPro\<yyyy>\<Mmm-dd>[\<set>]
+
+    A card is first identified from files in its root (cheap, and for GoPro it
+    names the exact model). That identity classifies files that carry no
+    metadata of their own -- MP4s, proxies -- while per-file EXIF overrides it
+    whenever present, because a card that has been through several cameras
+    carries stale root markers.
+
+    Every file is copied with an inline SHA-256 computed during the single read
+    of the card; the copy is re-hashed on disk and the source is deleted only
+    once the two agree. A failed verification leaves the card untouched.
+
+    If a drive holds no media this script does nothing at all: no folders are
+    created, nothing is deleted, no notification is raised.
+
+.PARAMETER Drive
+    Drive roots (e.g. 'D:'). Defaults to every removable drive.
+
+.EXAMPLE
+    .\Import-CameraMedia.ps1 -Drive D: -WhatIf
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [string[]] $Drive,
+    [string]   $CanonRoot = (Join-Path $env:USERPROFILE 'Pictures\Canon'),
+    [string]   $GoProRoot = (Join-Path $env:USERPROFILE 'Pictures\GoPro'),
+    [switch]   $KeepOriginals,
+    [switch]   $FlatGroups,
+    [switch]   $KeepProxies,
+    [switch]   $Eject,
+    [switch]   $Quiet,
+    [string]   $LogPath = (Join-Path $env:LOCALAPPDATA 'CameraImport\import.log')
+)
+
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'MediaLib.ps1')
+
+#region profiles ------------------------------------------------------------
+
+# StillExt  -- files we try to read EXIF from
+# OtherExt  -- carried along, dated from sidecars or the file clock
+# ProxyExt  -- regenerable junk written beside real media
+$script:Profiles = @(
+    [pscustomobject]@{
+        Name        = 'Canon'
+        Root        = $CanonRoot
+        MakePattern = 'canon'
+        NamePattern = '^(IMG|MVI|_MG|MDG|ST[A-E]|CRW|CSI)[_-]?\d+$'
+        StillExt    = @('.jpg', '.jpeg', '.cr2', '.cr3', '.crw', '.heic', '.heif', '.tif', '.tiff')
+        OtherExt    = @('.mp4', '.mov', '.avi', '.thm', '.wav')
+        ProxyExt    = @()
+        GroupSets   = $false
+    }
+    [pscustomobject]@{
+        Name        = 'GoPro'
+        Root        = $GoProRoot
+        MakePattern = 'gopro'
+        NamePattern = '^(GOPR\d{4}|G[PXHSBL0]\d{6}|GS__\d{4})$'
+        StillExt    = @('.jpg', '.jpeg', '.gpr', '.heic')
+        OtherExt    = @('.mp4', '.mov', '.360', '.wav')
+        ProxyExt    = @('.lrv', '.thm')
+        GroupSets   = $true
+    }
+)
+
+function Get-GoProSet {
+    <#
+        GoPro names files AABBCCCC, but BB/CCCC mean different things by type:
+
+          G0 01 7264.JPG   grouped photo  -> group is BB, so the set is 'G001'
+          GH 01 0123.MP4   video chapter  -> chapters share CCCC, set is 'GH0123'
+          GOPR1234.MP4     first chapter of an older GP01xxxx set
+
+        Returning the right set id is what keeps a burst together and, more
+        importantly, keeps chapters of one recording adjacent -- GH010123 and
+        GH020123 would otherwise be separated by GH010124 in a name sort.
+    #>
+    param([string] $BaseName)
+    if ($BaseName -match '^(G[0B])(\d{2})(\d{4})$') { return $Matches[1] + $Matches[2] }
+    if ($BaseName -match '^(G[PXHS])(\d{2})(\d{4})$') { return $Matches[1] + $Matches[3] }
+    if ($BaseName -match '^GOPR(\d{4})$') { return 'GP' + $Matches[1] }
+    return $null
+}
+
+#endregion
+
+#region logging -------------------------------------------------------------
+
+function Write-Log {
+    param([string] $Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string] $Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    try {
+        $dir = Split-Path -Parent $LogPath
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+    }
+    catch { }
+    if (-not $Quiet) {
+        switch ($Level) {
+            'WARN' { Write-Host $line -ForegroundColor Yellow }
+            'ERROR' { Write-Host $line -ForegroundColor Red }
+            default { Write-Host $line }
+        }
+    }
+}
+
+function Show-Toast {
+    param([string] $Title, [string] $Text)
+    if ($Quiet) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $ni = New-Object Windows.Forms.NotifyIcon
+        $ni.Icon = [Drawing.SystemIcons]::Information
+        $ni.BalloonTipTitle = $Title
+        $ni.BalloonTipText = $Text
+        $ni.Visible = $true
+        $ni.ShowBalloonTip(10000)
+        Start-Sleep -Milliseconds 6000
+        $ni.Dispose()
+    }
+    catch { }
+}
+
+#endregion
+
+#region scan ----------------------------------------------------------------
+
+function Get-CandidateFile {
+    param([string] $Root)
+    $dcim = Join-Path $Root 'DCIM'
+    if (-not (Test-Path -LiteralPath $dcim)) { return @() }
+    $keep = @()
+    foreach ($p in $script:Profiles) { $keep += $p.StillExt + $p.OtherExt + $p.ProxyExt }
+    $keep = $keep | Sort-Object -Unique
+    Get-ChildItem -LiteralPath $dcim -Recurse -File -Force -ErrorAction SilentlyContinue |
+    Where-Object {
+        $keep -contains $_.Extension.ToLowerInvariant() -and
+        -not $_.Name.StartsWith('._') -and              # macOS resource forks
+        $_.Name -ne '.DS_Store'
+    }
+}
+
+function Resolve-Profile {
+    <# Decides which vendor owns a file. EXIF beats the card's root markers. #>
+    param($File, $Meta, $CardVendor, [hashtable] $DirVendor)
+
+    $ext = $File.Extension.ToLowerInvariant()
+    $base = [IO.Path]::GetFileNameWithoutExtension($File.Name)
+
+    # 1. EXIF Make is authoritative.
+    if ($Meta -and $Meta.Make) {
+        foreach ($p in $script:Profiles) {
+            if ($Meta.Make -match $p.MakePattern) { return $p }
+        }
+        return $null            # a real camera, but not one we handle
+    }
+
+    # 2. A vendor string found inside the file (CR3 boxes, MP4 moov).
+    if ($Meta -and $Meta.VendorHint) {
+        foreach ($p in $script:Profiles) {
+            if ($p.Name -eq $Meta.VendorHint) { return $p }
+        }
+    }
+
+    # 3. Otherwise inherit from confirmed siblings, then from the card itself,
+    #    but only when the filename matches that vendor's convention.
+    $inherited = $null
+    if ($DirVendor.ContainsKey($File.DirectoryName)) { $inherited = $DirVendor[$File.DirectoryName] }
+    elseif ($CardVendor) { $inherited = $CardVendor }
+    if ($inherited) {
+        foreach ($p in $script:Profiles) {
+            if ($p.Name -eq $inherited -and $base -match $p.NamePattern) { return $p }
+        }
+    }
+    return $null
+}
+
+#endregion
+
+#region import --------------------------------------------------------------
+
+function Import-FromDrive {
+    param([string] $Root, [string] $VolumeName)
+
+    $Root = $Root.TrimEnd('\') + '\'
+    $result = [pscustomobject]@{
+        Drive = $Root; Camera = $null; Imported = 0; Duplicates = 0
+        Skipped = 0; Errors = 0; Bytes = [long] 0; ProxiesRemoved = 0
+        Folders = @(); ByProfile = @{}
+    }
+
+    $files = @(Get-CandidateFile $Root)
+    if ($files.Count -eq 0) {
+        # No media at all -- a gcode card, a plain USB stick, an empty card.
+        # Do nothing whatsoever.
+        Write-Log "$Root holds no camera media -- ignoring."
+        return $null
+    }
+
+    $card = Get-CardIdentity -Root $Root -VolumeName $VolumeName
+    if ($card.Vendor) {
+        $desc = $card.Vendor
+        if ($card.Model) { $desc += " $($card.Model)" }
+        if ($card.Firmware) { $desc += " (fw $($card.Firmware))" }
+        $result.Camera = $desc
+        Write-Log ("$Root identified as {0} via {1}" -f $desc, ($card.Evidence -join ', '))
+    }
+    else {
+        Write-Log "$Root -- no vendor markers in root; relying on per-file metadata."
+    }
+
+    # --- pass 1: read metadata, learn which folders belong to which vendor ---
+    $meta = @{}
+    $dirVendor = @{}
+    foreach ($f in $files) {
+        $ext = $f.Extension.ToLowerInvariant()
+        $m = $null
+        $isStill = $false
+        foreach ($p in $script:Profiles) { if ($p.StillExt -contains $ext) { $isStill = $true } }
+        if ($isStill) { $m = Get-PhotoMeta $f.FullName }
+        elseif ($ext -eq '.mp4' -or $ext -eq '.mov' -or $ext -eq '.360') {
+            $v = Get-Mp4Info $f.FullName
+            $m = [pscustomobject]@{
+                Make = $null; Model = $v.Model; DateTaken = $v.CreationTime; VendorHint = $v.Vendor
+            }
+        }
+        $meta[$f.FullName] = $m
+        if ($m -and $m.Make) {
+            foreach ($p in $script:Profiles) {
+                if ($m.Make -match $p.MakePattern) { $dirVendor[$f.DirectoryName] = $p.Name }
+            }
+        }
+    }
+
+    # --- pass 2: assign profile, resolve capture date, build the plan --------
+    $plan = New-Object Collections.ArrayList
+    $proxies = New-Object Collections.ArrayList
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+
+    foreach ($f in $files) {
+        $m = $meta[$f.FullName]
+        $ext = $f.Extension.ToLowerInvariant()
+        $prof = Resolve-Profile -File $f -Meta $m -CardVendor $card.Vendor -DirVendor $dirVendor
+
+        if (-not $prof) {
+            $result.Skipped++
+            $who = 'unknown'
+            if ($m -and $m.Make) { $who = $m.Make }
+            Write-Log ("skip ({0}) {1}" -f $who, $f.FullName)
+            continue
+        }
+
+        if ($prof.ProxyExt -contains $ext) {
+            [void] $proxies.Add($f)         # handled after the real media lands
+            continue
+        }
+
+        $taken = $null
+        if ($m) { $taken = $m.DateTaken }
+        if (-not $taken) {
+            # A movie's .THM sidecar carries the EXIF the movie itself lacks.
+            $thm = Join-Path $f.DirectoryName ([IO.Path]::GetFileNameWithoutExtension($f.Name) + '.THM')
+            if (Test-Path -LiteralPath $thm) {
+                $tm = Get-PhotoMeta $thm
+                if ($tm.DateTaken) { $taken = $tm.DateTaken }
+            }
+        }
+        if (-not $taken) { $taken = $f.LastWriteTime }
+
+        $dir = Join-Path (Join-Path $prof.Root $taken.ToString('yyyy', $inv)) $taken.ToString('MMM-dd', $inv)
+        $set = $null
+        if ($prof.GroupSets -and -not $FlatGroups) {
+            $set = Get-GoProSet ([IO.Path]::GetFileNameWithoutExtension($f.Name))
+        }
+        [void] $plan.Add([pscustomobject]@{ File = $f; Profile = $prof; DestDir = $dir; Set = $set })
+    }
+
+    if ($plan.Count -eq 0) {
+        Write-Log "$Root -- no files from a supported camera; nothing done." 'WARN'
+        return $result
+    }
+
+    # A set only earns its own subfolder when it actually has members to keep
+    # together; a lone file would just get a pointless one-file directory.
+    $setCount = @{}
+    foreach ($i in $plan) {
+        if (-not $i.Set) { continue }
+        $k = '{0}|{1}' -f $i.DestDir, $i.Set
+        if ($setCount.ContainsKey($k)) { $setCount[$k]++ } else { $setCount[$k] = 1 }
+    }
+    foreach ($i in $plan) {
+        if ($i.Set -and $setCount['{0}|{1}' -f $i.DestDir, $i.Set] -ge 2) {
+            $i.DestDir = Join-Path $i.DestDir $i.Set
+        }
+    }
+
+    $mb = [math]::Round((($plan | ForEach-Object { $_.File.Length } | Measure-Object -Sum).Sum) / 1MB, 1)
+    $dirs = @($plan | ForEach-Object { $_.DestDir } | Sort-Object -Unique).Count
+    Write-Log ("{0} -- {1} file(s), {2} MB, into {3} folder(s)." -f $Root, $plan.Count, $mb, $dirs)
+
+    # --- pass 3: copy, verify, then delete the source -----------------------
+    foreach ($item in $plan) {
+        $f = $item.File
+        $destDir = $item.DestDir
+        $action = 'Move'
+        if ($KeepOriginals) { $action = 'Copy' }
+        if (-not $PSCmdlet.ShouldProcess((Join-Path $destDir $f.Name), $action)) { continue }
+
+        try {
+            if (-not (Test-Path -LiteralPath $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                Write-Log "created $destDir"
+            }
+            if ($result.Folders -notcontains $destDir) { $result.Folders += $destDir }
+
+            $tmp = Join-Path $destDir ('.{0}.cimport' -f [guid]::NewGuid().ToString('N'))
+            $srcHash = Copy-WithHash $f.FullName $tmp
+            $tmpHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash
+
+            if ($tmpHash -ne $srcHash) {
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                $result.Errors++
+                Write-Log ("VERIFY FAILED, card left untouched: {0}" -f $f.FullName) 'ERROR'
+                continue
+            }
+
+            $target = Join-Path $destDir $f.Name
+            if (Test-Path -LiteralPath $target) {
+                if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $tmpHash) {
+                    Remove-Item -LiteralPath $tmp -Force
+                    if (-not $KeepOriginals) { Remove-SourceFile $f.FullName }
+                    $result.Duplicates++
+                    continue
+                }
+                $target = Get-FreeName $destDir $f.Name
+                Write-Log ("name clash, saving as {0}" -f (Split-Path -Leaf $target)) 'WARN'
+            }
+
+            Move-Item -LiteralPath $tmp -Destination $target -Force
+            $o = New-Object IO.FileInfo $target
+            $o.CreationTime = $f.CreationTime
+            $o.LastWriteTime = $f.LastWriteTime
+
+            if (-not $KeepOriginals) { Remove-SourceFile $f.FullName }
+
+            $result.Imported++
+            $result.Bytes += $f.Length
+            $n = $item.Profile.Name
+            if ($result.ByProfile.ContainsKey($n)) { $result.ByProfile[$n]++ } else { $result.ByProfile[$n] = 1 }
+        }
+        catch {
+            $result.Errors++
+            Write-Log ("{0}: {1}" -f $f.FullName, $_.Exception.Message) 'ERROR'
+        }
+    }
+
+    # --- proxies ------------------------------------------------------------
+    # Only once the real media is safely in the library and nothing failed.
+    if ($proxies.Count -gt 0) {
+        if ($KeepProxies -or $KeepOriginals) {
+            Write-Log ("left {0} proxy file(s) (.LRV/.THM) on the card" -f $proxies.Count)
+        }
+        elseif ($result.Errors -gt 0 -or $result.Imported -eq 0) {
+            Write-Log ("kept {0} proxy file(s): import did not complete cleanly" -f $proxies.Count) 'WARN'
+        }
+        else {
+            foreach ($p in $proxies) {
+                if (-not $PSCmdlet.ShouldProcess($p.FullName, 'Delete proxy')) { continue }
+                try { Remove-SourceFile $p.FullName; $result.ProxiesRemoved++ }
+                catch { Write-Log ("could not delete proxy {0}: {1}" -f $p.FullName, $_.Exception.Message) 'WARN' }
+            }
+            Write-Log ("deleted {0} proxy file(s) (.LRV/.THM) from the card" -f $result.ProxiesRemoved)
+        }
+    }
+
+    return $result
+}
+
+function Invoke-Eject {
+    param([string] $Root)
+    try {
+        $letter = $Root.Substring(0, 2)
+        $shell = New-Object -ComObject Shell.Application
+        $item = $shell.Namespace(17).ParseName($letter)
+        if ($item) { $item.InvokeVerb('Eject'); Write-Log "ejected $letter" }
+    }
+    catch { Write-Log ("eject failed: {0}" -f $_.Exception.Message) 'WARN' }
+}
+
+#endregion
+
+#region main ----------------------------------------------------------------
+
+$targets = @()
+if ($Drive -and $Drive.Count -gt 0) {
+    foreach ($d in $Drive) { $targets += [pscustomobject]@{ Root = $d; VolumeName = '' } }
+}
+else {
+    foreach ($d in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 2' -ErrorAction SilentlyContinue)) {
+        $targets += [pscustomobject]@{ Root = $d.DeviceID; VolumeName = $d.VolumeName }
+    }
+}
+if ($targets.Count -eq 0) {
+    Write-Log 'No removable drives present.' 'WARN'
+    return
+}
+
+$summaries = @()
+foreach ($t in $targets) {
+    $root = $t.Root
+    if ($root -notmatch '\\$') { $root += '\' }
+    if (-not (Test-Path -LiteralPath $root)) {
+        Write-Log "$root is not accessible." 'WARN'
+        continue
+    }
+    $r = Import-FromDrive -Root $root -VolumeName $t.VolumeName
+    if ($r) {
+        $summaries += $r
+        if ($Eject -and $r.Errors -eq 0 -and $r.Imported -gt 0) { Invoke-Eject $root }
+    }
+}
+
+foreach ($s in $summaries) {
+    $mb = [math]::Round($s.Bytes / 1MB, 1)
+    $by = ($s.ByProfile.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ', '
+    if (-not $by) { $by = 'none' }
+    Write-Log ("{0} done: {1} imported ({2}), {3} duplicate, {4} skipped, {5} error(s), {6} proxies removed -- {7} MB" -f `
+            $s.Drive, $s.Imported, $by, $s.Duplicates, $s.Skipped, $s.Errors, $s.ProxiesRemoved, $mb)
+
+    if ($s.Imported -gt 0 -or $s.Errors -gt 0) {
+        $title = 'Camera import'
+        if ($s.Camera) { $title = $s.Camera }
+        $where = ($s.Folders | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object -Unique) -join ', '
+        Show-Toast $title ("{0} file(s), {1} MB`n{2}" -f $s.Imported, $mb, $where)
+    }
+}
+
+$summaries
+
+#endregion

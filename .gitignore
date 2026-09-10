@@ -1,0 +1,8 @@
+# Local logs and scratch
+*.log
+*.cimport
+.cimport-tmp/
+
+# Windows
+Thumbs.db
+desktop.ini
