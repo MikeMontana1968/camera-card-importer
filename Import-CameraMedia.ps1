@@ -187,6 +187,35 @@ function Resolve-Profile {
 
 #region import --------------------------------------------------------------
 
+function Find-DuplicateInScope {
+    <#
+        Looks for a byte-identical copy already in the library, searching the day
+        folder AND one level of set subfolders beneath it.
+
+        Checking only the exact destination path is not enough: whether a file
+        lands in a set subfolder depends on how many of its set-mates are present
+        in that import, so the same photo can legitimately target
+        'Sep-06\G001\X.JPG' on one run and 'Sep-06\X.JPG' on another. A path-scoped
+        check misses that and silently writes a second copy.
+
+        Length is compared first so only real candidates are hashed.
+    #>
+    param([string] $ScopeDir, [string] $Name, [long] $Length, [string] $Hash)
+
+    if (-not (Test-Path -LiteralPath $ScopeDir)) { return $null }
+
+    $candidates = @(Get-ChildItem -LiteralPath $ScopeDir -Filter $Name -File -Force -ErrorAction SilentlyContinue)
+    foreach ($d in @(Get-ChildItem -LiteralPath $ScopeDir -Directory -Force -ErrorAction SilentlyContinue)) {
+        $candidates += @(Get-ChildItem -LiteralPath $d.FullName -Filter $Name -File -Force -ErrorAction SilentlyContinue)
+    }
+
+    foreach ($c in $candidates) {
+        if ($c.Length -ne $Length) { continue }
+        if ((Get-FileHash -LiteralPath $c.FullName -Algorithm SHA256).Hash -eq $Hash) { return $c.FullName }
+    }
+    return $null
+}
+
 function Import-FromDrive {
     param([string] $Root, [string] $VolumeName)
 
@@ -280,7 +309,11 @@ function Import-FromDrive {
         if ($prof.GroupSets -and -not $FlatGroups) {
             $set = Get-GoProSet ([IO.Path]::GetFileNameWithoutExtension($f.Name))
         }
-        [void] $plan.Add([pscustomobject]@{ File = $f; Profile = $prof; DestDir = $dir; Set = $set })
+        # ScopeDir stays the day folder even after DestDir gains a set subfolder;
+        # duplicate detection searches the whole day, not just the exact target.
+        [void] $plan.Add([pscustomobject]@{
+                File = $f; Profile = $prof; DestDir = $dir; ScopeDir = $dir; Set = $set
+            })
     }
 
     if ($plan.Count -eq 0) {
@@ -332,14 +365,19 @@ function Import-FromDrive {
                 continue
             }
 
+            $existing = Find-DuplicateInScope -ScopeDir $item.ScopeDir -Name $f.Name `
+                -Length $f.Length -Hash $tmpHash
+            if ($existing) {
+                Remove-Item -LiteralPath $tmp -Force
+                if (-not $KeepOriginals) { Remove-SourceFile $f.FullName }
+                $result.Duplicates++
+                Write-Log ("duplicate of {0}" -f $existing)
+                continue
+            }
+
             $target = Join-Path $destDir $f.Name
             if (Test-Path -LiteralPath $target) {
-                if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq $tmpHash) {
-                    Remove-Item -LiteralPath $tmp -Force
-                    if (-not $KeepOriginals) { Remove-SourceFile $f.FullName }
-                    $result.Duplicates++
-                    continue
-                }
+                # Same name, different bytes -- keep both.
                 $target = Get-FreeName $destDir $f.Name
                 Write-Log ("name clash, saving as {0}" -f (Split-Path -Leaf $target)) 'WARN'
             }

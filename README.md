@@ -212,12 +212,20 @@ For each file:
 2. Re-hash the written file from disk.
 3. If the hashes differ, delete the temp file, log an error, and **leave the
    source alone**.
-4. If a file of that name already exists, compare hashes: identical means already
-   imported (delete the source, count as duplicate); different means keep both,
-   with a `_1` suffix.
+4. Look for a byte-identical copy already in the library — searching the whole day
+   folder **and one level of set subfolders**, not just the exact target path.
+   A match means already imported: delete the source, count it as a duplicate.
+   A file of the same name but different bytes at the target keeps both, with a
+   `_1` suffix.
 5. Restore the original timestamps, then delete the source.
 
 Re-inserting an already-imported card is therefore a safe no-op rather than a
+second copy.
+
+The day-folder scope matters because whether a file lands in a set subfolder
+depends on how many of its set-mates are in *that* import. The same photo can
+legitimately target `Sep-06\G001\X.JPG` on one run and `Sep-06\X.JPG` on another,
+so a check scoped to the exact destination path would miss the match and write a
 second copy.
 
 ### Proxies
