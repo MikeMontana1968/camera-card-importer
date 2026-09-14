@@ -24,6 +24,7 @@ param(
     [switch] $FlatGroups,
     [switch] $Eject,
     [switch] $Once,
+    [switch] $Quiet,
     [string] $LogPath = (Join-Path $env:LOCALAPPDATA 'CameraImport\import.log')
 )
 
@@ -31,17 +32,26 @@ $ErrorActionPreference = 'Stop'
 $ImportScript = Join-Path $PSScriptRoot 'Import-CameraMedia.ps1'
 $SourceId = 'CameraVolumeChange'
 
+# For Show-Toast and Get-CardIdentity. The importer dot-sources this too; the
+# watcher needs it to name the camera before handing off.
+. (Join-Path $PSScriptRoot 'MediaLib.ps1')
+
+# Detection toasts sit on the hot path -- Show-Toast blocks for its dwell, so
+# keep these brief. The completion toast raised by the importer stays at 6s.
+$DetectDwellMs = 2500
+
 function Write-WatchLog {
     param([string] $Message, [string] $Level = 'INFO')
     $line = '{0} [{1}] (watcher) {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    try {
-        $dir = Split-Path -Parent $LogPath
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        }
-        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+    $written = Write-LogLine -Path $LogPath -Line $line
+    # The watcher runs hidden, so a warning stream would go nowhere. Say it once
+    # in the place the user will actually look: a toast.
+    if ($written -ne 'ok' -and -not $script:LogDivertWarned) {
+        $script:LogDivertWarned = $true
+        Show-Toast -Title 'Camera import: log locked' `
+            -Text ("Another process is holding`n{0}`nEntries are going to .locked" -f $LogPath) `
+            -DwellMs $DetectDwellMs -Quiet:$Quiet
     }
-    catch { }
     Write-Verbose $line
 }
 
@@ -93,13 +103,34 @@ function Invoke-Scan {
         if ($seen.ContainsKey($key)) { continue }
 
         $root = $d.DeviceID + '\'
+        $label = if ([string]::IsNullOrWhiteSpace($d.VolumeName)) { $d.DeviceID }
+                 else { '{0} ({1})' -f $d.DeviceID, $d.VolumeName }
         Write-WatchLog ("new volume {0} '{1}' -- checking" -f $d.DeviceID, $d.VolumeName)
+
+        # Stage 1 -- fires for any removable volume, before we know what it holds.
+        Show-Toast -Title 'Drive detected' -Text ("{0}`nchecking for camera media..." -f $label) `
+            -DwellMs $DetectDwellMs -Quiet:$Quiet
 
         if (-not (Test-DriveReady $root)) {
             Write-WatchLog ("{0} has no DCIM folder -- ignoring" -f $d.DeviceID)
+            # Stage 2a -- say so, rather than leaving the first toast unanswered.
+            Show-Toast -Title 'No camera media' -Text ("{0}`nnothing to import." -f $label) `
+                -DwellMs $DetectDwellMs -Quiet:$Quiet
             $seen[$key] = $true
             continue
         }
+
+        # Stage 2b -- name the camera if the root markers reveal it. This is a
+        # prior only; per-file EXIF still decides where files actually land.
+        $vendor = $null
+        try {
+            $id = Get-CardIdentity -Root $root -VolumeName $d.VolumeName
+            if ($id) { $vendor = $id.Vendor }
+        }
+        catch { }
+        $what = if ($vendor) { "$vendor card" } else { 'Camera card' }
+        Show-Toast -Title $what -Text ("{0}`nimporting..." -f $label) `
+            -DwellMs $DetectDwellMs -Quiet:$Quiet
 
         try {
             $splat = @{

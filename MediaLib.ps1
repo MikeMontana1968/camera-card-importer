@@ -412,3 +412,92 @@ function Remove-SourceFile {
 }
 
 #endregion
+
+#region notification --------------------------------------------------------
+
+function Show-Toast {
+    <#
+        Balloon notification. Shared by the importer and the watcher so both
+        speak with one voice.
+
+        The sleep is not padding: the balloon is owned by the NotifyIcon, and
+        disposing the icon tears the balloon down with it. DwellMs is therefore
+        both how long the toast stays up and how long this call blocks, so keep
+        it short for anything on the hot path.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Title,
+        [string] $Text,
+        [int]    $DwellMs = 6000,
+        [switch] $Quiet
+    )
+    if ($Quiet) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $ni = New-Object Windows.Forms.NotifyIcon
+        $ni.Icon = [Drawing.SystemIcons]::Information
+        $ni.BalloonTipTitle = $Title
+        $ni.BalloonTipText = $Text
+        $ni.Visible = $true
+        $ni.ShowBalloonTip([math]::Max($DwellMs, 1000))
+        Start-Sleep -Milliseconds $DwellMs
+        $ni.Dispose()
+    }
+    catch { }
+}
+
+#endregion
+
+#region logging -------------------------------------------------------------
+
+function Write-LogLine {
+    <#
+        Append one line to a log file, surviving a lock.
+
+        A log write must never abort an import, but a bare `catch {}` made a
+        *permanently* locked log indistinguishable from an idle watcher: any
+        process holding the file open -- an editor, a tail, a backup or AV
+        scanner -- silently disabled logging with no symptom at all. That cost
+        real debugging time twice.
+
+        So transient locks are retried with a short backoff, and a lock that
+        outlives the retries diverts the line to a '.locked' sidecar rather
+        than dropping it. The sidecar's mere existence is the signal that
+        something is sitting on the main log.
+
+        Returns 'ok', 'sidecar', or 'dropped'.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $Line,
+        [int] $Retries = 3
+    )
+
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        try { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        catch { return 'dropped' }
+    }
+
+    $delay = 80
+    for ($i = 0; $i -le $Retries; $i++) {
+        try {
+            Add-Content -LiteralPath $Path -Value $Line -Encoding utf8 -ErrorAction Stop
+            return 'ok'
+        }
+        catch {
+            if ($i -lt $Retries) {
+                Start-Sleep -Milliseconds $delay
+                $delay *= 2
+            }
+        }
+    }
+
+    try {
+        Add-Content -LiteralPath ($Path + '.locked') -Value $Line -Encoding utf8 -ErrorAction Stop
+        return 'sidecar'
+    }
+    catch { return 'dropped' }
+}
+
+#endregion

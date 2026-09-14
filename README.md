@@ -16,8 +16,9 @@ formats, for reasons explained below.
 Two rules drive the whole design:
 
 1. **A card that holds no camera media is left completely alone.** No folder is
-   created, nothing is deleted, no notification fires. Plugging in a card full of
-   3D-printer gcode produces exactly one line in a log file.
+   created, nothing is deleted, nothing is imported. Plugging in a card full of
+   3D-printer gcode touches neither the card nor the library — the watcher just
+   says so and stops (see *Notifications*).
 2. **Nothing is deleted from a card until its copy has been hash-verified on
    disk.** A failed verification aborts that file and leaves the card untouched.
 
@@ -77,7 +78,7 @@ startup item) and `Import-CameraMedia.ps1` (one-off).
 | `-FlatGroups` | Disable GoPro set subfolders; everything lands in the day folder. |
 | `-KeepProxies` | Keep `.LRV`/`.THM` proxies on the card instead of deleting them. |
 | `-Eject` | Eject the card after a clean import. |
-| `-Quiet` | No console output and no toast; the log is still written. |
+| `-Quiet` | No console output and no toasts; the log is still written. |
 
 ### Manual runs
 
@@ -91,6 +92,14 @@ startup item) and `Import-CameraMedia.ps1` (one-off).
 testing against a copied card image.
 
 Log: `%LOCALAPPDATA%\CameraImport\import.log`
+
+> **If you ever find `import.log.locked` next to it**, another process was holding
+> the main log open and entries were diverted there so they would not be lost.
+> Windows denies the append outright, and an earlier version swallowed that error
+> silently — which made a locked log look exactly like an idle watcher, twice.
+> Writes are now retried briefly before diverting, and the watcher raises a toast
+> the first time it happens. Close whatever has the file open (an editor, a
+> `tail -f`, a backup or AV scanner) and logging resumes on its own.
 
 ---
 
@@ -256,6 +265,27 @@ A freshly mounted card can report a drive letter before its tree is browsable, s
 the watcher retries for up to 12 seconds before concluding there is no `DCIM`.
 
 A named mutex keeps a single watcher per logon session.
+
+### Notifications
+
+Every removable volume produces a two-stage announcement, then the importer adds
+a third toast if it actually moved anything:
+
+| stage | raised by | when | example |
+|---|---|---|---|
+| 1 | watcher | any removable volume arrives | **Drive detected** — `E: (EOS_DIGITAL)` |
+| 2a | watcher | no `DCIM` found | **No camera media** — nothing to import |
+| 2b | watcher | `DCIM` found, vendor guessed from root markers | **Canon card** — importing… |
+| 3 | importer | import finished with files moved or errors | **Canon EOS 70D** — 71 files, 187 MB |
+
+Stage 2b names the vendor from root markers only. That is a prior, not a verdict —
+per-file EXIF still decides where files land, so a card carrying stale markers from
+another camera can toast one name and file under another.
+
+A balloon belongs to its `NotifyIcon` and dies when the icon is disposed, so the
+dwell is also how long `Show-Toast` blocks. Detection toasts therefore use a short
+2.5 s dwell, adding about 5 s before an import starts; the completion toast keeps
+the original 6 s. `-Quiet` silences all of them.
 
 ### Why a Startup item and not a Scheduled Task
 

@@ -95,14 +95,11 @@ function Get-GoProSet {
 function Write-Log {
     param([string] $Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string] $Level = 'INFO')
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    try {
-        $dir = Split-Path -Parent $LogPath
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        }
-        Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+    $written = Write-LogLine -Path $LogPath -Line $line
+    if ($written -ne 'ok' -and -not $script:LogDivertWarned) {
+        $script:LogDivertWarned = $true
+        Write-Warning ("log '{0}' is locked by another process -- entries are going to '{0}.locked'" -f $LogPath)
     }
-    catch { }
     if (-not $Quiet) {
         switch ($Level) {
             'WARN' { Write-Host $line -ForegroundColor Yellow }
@@ -112,22 +109,7 @@ function Write-Log {
     }
 }
 
-function Show-Toast {
-    param([string] $Title, [string] $Text)
-    if ($Quiet) { return }
-    try {
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-        $ni = New-Object Windows.Forms.NotifyIcon
-        $ni.Icon = [Drawing.SystemIcons]::Information
-        $ni.BalloonTipTitle = $Title
-        $ni.BalloonTipText = $Text
-        $ni.Visible = $true
-        $ni.ShowBalloonTip(10000)
-        Start-Sleep -Milliseconds 6000
-        $ni.Dispose()
-    }
-    catch { }
-}
+# Show-Toast now lives in MediaLib.ps1, so the watcher can raise toasts too.
 
 #endregion
 
@@ -477,7 +459,7 @@ foreach ($s in $summaries) {
         $title = 'Camera import'
         if ($s.Camera) { $title = $s.Camera }
         $where = ($s.Folders | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object -Unique) -join ', '
-        Show-Toast $title ("{0} file(s), {1} MB`n{2}" -f $s.Imported, $mb, $where)
+        Show-Toast -Title $title -Text ("{0} file(s), {1} MB`n{2}" -f $s.Imported, $mb, $where) -Quiet:$Quiet
     }
 }
 
