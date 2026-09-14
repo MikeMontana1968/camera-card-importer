@@ -120,18 +120,10 @@ function Invoke-Scan {
             continue
         }
 
-        # Stage 2b -- name the camera if the root markers reveal it. This is a
-        # prior only; per-file EXIF still decides where files actually land.
-        $vendor = $null
-        try {
-            $id = Get-CardIdentity -Root $root -VolumeName $d.VolumeName
-            if ($id) { $vendor = $id.Vendor }
-        }
-        catch { }
-        $what = if ($vendor) { "$vendor card" } else { 'Camera card' }
-        Show-Toast -Title $what -Text ("{0}`nimporting..." -f $label) `
-            -DwellMs $DetectDwellMs -Quiet:$Quiet
-
+        # Stage 2b ("<vendor> card -- importing...") is raised by the importer,
+        # not here: a DCIM folder alone does not mean there is anything to
+        # import, and promising an import that never happens is worse than
+        # announcing it a moment later.
         try {
             $splat = @{
                 Drive     = $d.DeviceID

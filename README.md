@@ -274,13 +274,22 @@ a third toast if it actually moved anything:
 | stage | raised by | when | example |
 |---|---|---|---|
 | 1 | watcher | any removable volume arrives | **Drive detected** — `E: (EOS_DIGITAL)` |
-| 2a | watcher | no `DCIM` found | **No camera media** — nothing to import |
-| 2b | watcher | `DCIM` found, vendor guessed from root markers | **Canon card** — importing… |
+| 2a | watcher | no `DCIM` folder at all | **No camera media** — nothing to import |
+| 2b | importer | `DCIM` scanned and it holds media | **Canon card** — importing 71 file(s), 187 MB… |
+| 2c | importer | `DCIM` scanned and it holds nothing usable | **No camera media** — nothing to import |
 | 3 | importer | import finished with files moved or errors | **Canon EOS 70D** — 71 files, 187 MB |
 
-Stage 2b names the vendor from root markers only. That is a prior, not a verdict —
-per-file EXIF still decides where files land, so a card carrying stale markers from
-another camera can toast one name and file under another.
+Stage 2b is raised **after** the file scan, not on the mere presence of `DCIM`.
+A drive can carry a `DCIM` folder full of things no camera wrote, and announcing
+an import that then does not happen is worse than announcing it a moment later.
+That is also why 2a and 2c both exist: the watcher can rule out a card cheaply
+when there is no `DCIM`, but only the importer can tell that a `DCIM` is empty of
+media, and either way you get told.
+
+The vendor in stage 2b still comes from root markers — a prior, not a verdict.
+Per-file EXIF decides where files actually land, so a card carrying stale markers
+from another camera can toast one name and file under another. The file count and
+size in that toast are real, though: they come from the completed scan.
 
 A balloon belongs to its `NotifyIcon` and dies when the icon is disposed, so the
 dwell is also how long `Show-Toast` blocks. Detection toasts therefore use a short

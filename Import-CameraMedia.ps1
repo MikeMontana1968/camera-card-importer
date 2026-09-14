@@ -16,8 +16,10 @@
     of the card; the copy is re-hashed on disk and the source is deleted only
     once the two agree. A failed verification leaves the card untouched.
 
-    If a drive holds no media this script does nothing at all: no folders are
-    created, nothing is deleted, no notification is raised.
+    If a drive holds no media this script changes nothing at all: no folders are
+    created, nothing is deleted, nothing is read twice. It does say so with a
+    toast, so a card that looks ignored can be told apart from one that was
+    never noticed.
 
 .PARAMETER Drive
     Drive roots (e.g. 'D:'). Defaults to every removable drive.
@@ -40,6 +42,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'MediaLib.ps1')
+
+# Progress toasts sit in front of the work, and Show-Toast blocks for its dwell,
+# so keep them short. The completion toast at the end keeps the longer default.
+$DetectDwellMs = 2500
 
 #region profiles ------------------------------------------------------------
 
@@ -210,9 +216,11 @@ function Import-FromDrive {
 
     $files = @(Get-CandidateFile $Root)
     if ($files.Count -eq 0) {
-        # No media at all -- a gcode card, a plain USB stick, an empty card.
-        # Do nothing whatsoever.
+        # A DCIM folder but nothing in it we recognise -- still nothing to do.
+        # The card and the library are both left untouched.
         Write-Log "$Root holds no camera media -- ignoring."
+        Show-Toast -Title 'No camera media' -Text ("{0}`nnothing to import." -f $Root) `
+            -DwellMs $DetectDwellMs -Quiet:$Quiet
         return $null
     }
 
@@ -227,6 +235,14 @@ function Import-FromDrive {
     else {
         Write-Log "$Root -- no vendor markers in root; relying on per-file metadata."
     }
+
+    # Announce the import only now that the scan has proved there is one. The
+    # vendor here is still the root-marker prior -- per-file EXIF may yet file
+    # some of these elsewhere -- but the file count is real.
+    $found = [math]::Round((($files | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+    Show-Toast -Title $(if ($card.Vendor) { "$($card.Vendor) card" } else { 'Camera card' }) `
+        -Text ("{0}`nimporting {1} file(s), {2} MB..." -f $Root, $files.Count, $found) `
+        -DwellMs $DetectDwellMs -Quiet:$Quiet
 
     # --- pass 1: read metadata, learn which folders belong to which vendor ---
     $meta = @{}
