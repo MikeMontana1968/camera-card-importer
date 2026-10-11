@@ -4,7 +4,9 @@
 
 .DESCRIPTION
     Canon  -> %USERPROFILE%\CameraImports\Canon\<yyyy>\<Mmm-dd>
-    GoPro  -> %USERPROFILE%\CameraImports\GoPro\<yyyy>\<Mmm-dd>[\<set>]
+    GoPro  -> %USERPROFILE%\CameraImports\GoPro\<yyyy>\<Mmm-dd>\DCIM\<card folders...>
+              A 1:1 mirror of the card: same folders, same names, every file
+              (including .LRV/.THM). The day is that of the card's earliest file.
 
     A card is first identified from files in its root (cheap, and for GoPro it
     names the exact model). That identity classifies files that carry no
@@ -33,8 +35,6 @@ param(
     [string]   $CanonRoot = (Join-Path $env:USERPROFILE 'CameraImports\Canon'),
     [string]   $GoProRoot = (Join-Path $env:USERPROFILE 'CameraImports\GoPro'),
     [switch]   $KeepOriginals,
-    [switch]   $FlatGroups,
-    [switch]   $KeepProxies,
     [switch]   $Eject,
     [switch]   $Quiet,
     [string]   $LogPath = (Join-Path $env:LOCALAPPDATA 'CameraImport\import.log')
@@ -51,7 +51,10 @@ $DetectDwellMs = 2500
 
 # StillExt  -- files we try to read EXIF from
 # OtherExt  -- carried along, dated from sidecars or the file clock
-# ProxyExt  -- regenerable junk written beside real media
+# Mirror    -- the card's DCIM tree is reproduced as-is under one day folder:
+#              every file is taken (whatever its extension or name), nothing is
+#              regrouped, split by date, or discarded. Used when a card must
+#              come across 1:1 (GoPro: time-lapses, chapters, .LRV/.THM).
 $script:Profiles = @(
     [pscustomobject]@{
         Name        = 'Canon'
@@ -60,8 +63,7 @@ $script:Profiles = @(
         NamePattern = '^(IMG|MVI|_MG|MDG|ST[A-E]|CRW|CSI)[_-]?\d+$'
         StillExt    = @('.jpg', '.jpeg', '.cr2', '.cr3', '.crw', '.heic', '.heif', '.tif', '.tiff')
         OtherExt    = @('.mp4', '.mov', '.avi', '.thm', '.wav')
-        ProxyExt    = @()
-        GroupSets   = $false
+        Mirror      = $false
     }
     [pscustomobject]@{
         Name        = 'GoPro'
@@ -69,30 +71,10 @@ $script:Profiles = @(
         MakePattern = 'gopro'
         NamePattern = '^(GOPR\d{4}|G[PXHSBL0]\d{6}|GS__\d{4})$'
         StillExt    = @('.jpg', '.jpeg', '.gpr', '.heic')
-        OtherExt    = @('.mp4', '.mov', '.360', '.wav')
-        ProxyExt    = @('.lrv', '.thm')
-        GroupSets   = $true
+        OtherExt    = @('.mp4', '.mov', '.360', '.wav', '.lrv', '.thm')
+        Mirror      = $true
     }
 )
-
-function Get-GoProSet {
-    <#
-        GoPro names files AABBCCCC, but BB/CCCC mean different things by type:
-
-          G0 01 7264.JPG   grouped photo  -> group is BB, so the set is 'G001'
-          GH 01 0123.MP4   video chapter  -> chapters share CCCC, set is 'GH0123'
-          GOPR1234.MP4     first chapter of an older GP01xxxx set
-
-        Returning the right set id is what keeps a burst together and, more
-        importantly, keeps chapters of one recording adjacent -- GH010123 and
-        GH020123 would otherwise be separated by GH010124 in a name sort.
-    #>
-    param([string] $BaseName)
-    if ($BaseName -match '^(G[0B])(\d{2})(\d{4})$') { return $Matches[1] + $Matches[2] }
-    if ($BaseName -match '^(G[PXHS])(\d{2})(\d{4})$') { return $Matches[1] + $Matches[3] }
-    if ($BaseName -match '^GOPR(\d{4})$') { return 'GP' + $Matches[1] }
-    return $null
-}
 
 #endregion
 
@@ -122,15 +104,23 @@ function Write-Log {
 #region scan ----------------------------------------------------------------
 
 function Get-CandidateFile {
-    param([string] $Root)
+    <#
+        On a card whose root marks it as a mirrored vendor (GoPro) every file
+        under DCIM is a candidate -- an unfamiliar extension must not leave a
+        file behind on a card we are about to treat as fully imported. Other
+        cards are filtered to the known media extensions.
+    #>
+    param([string] $Root, [string] $CardVendor)
     $dcim = Join-Path $Root 'DCIM'
     if (-not (Test-Path -LiteralPath $dcim)) { return @() }
+    $mirrorCard = $false
+    foreach ($p in $script:Profiles) { if ($p.Mirror -and $p.Name -eq $CardVendor) { $mirrorCard = $true } }
     $keep = @()
-    foreach ($p in $script:Profiles) { $keep += $p.StillExt + $p.OtherExt + $p.ProxyExt }
+    foreach ($p in $script:Profiles) { $keep += $p.StillExt + $p.OtherExt }
     $keep = $keep | Sort-Object -Unique
     Get-ChildItem -LiteralPath $dcim -Recurse -File -Force -ErrorAction SilentlyContinue |
     Where-Object {
-        $keep -contains $_.Extension.ToLowerInvariant() -and
+        ($mirrorCard -or $keep -contains $_.Extension.ToLowerInvariant()) -and
         -not $_.Name.StartsWith('._') -and              # macOS resource forks
         $_.Name -ne '.DS_Store'
     }
@@ -165,7 +155,9 @@ function Resolve-Profile {
     elseif ($CardVendor) { $inherited = $CardVendor }
     if ($inherited) {
         foreach ($p in $script:Profiles) {
-            if ($p.Name -eq $inherited -and $base -match $p.NamePattern) { return $p }
+            if ($p.Name -ne $inherited) { continue }
+            # A mirrored card is taken whole, so a renamed file still belongs to it.
+            if ($p.Mirror -or $base -match $p.NamePattern) { return $p }
         }
     }
     return $null
@@ -210,11 +202,15 @@ function Import-FromDrive {
     $Root = $Root.TrimEnd('\') + '\'
     $result = [pscustomobject]@{
         Drive = $Root; Camera = $null; Imported = 0; Duplicates = 0
-        Skipped = 0; Errors = 0; Bytes = [long] 0; ProxiesRemoved = 0
+        Skipped = 0; Errors = 0; Bytes = [long] 0
         Folders = @(); ByProfile = @{}
     }
 
-    $files = @(Get-CandidateFile $Root)
+    # Identity first: it decides whether the scan takes every file (mirrored
+    # vendors) or only the known media extensions.
+    $card = Get-CardIdentity -Root $Root -VolumeName $VolumeName
+
+    $files = @(Get-CandidateFile -Root $Root -CardVendor $card.Vendor)
     if ($files.Count -eq 0) {
         # A DCIM folder but nothing in it we recognise -- still nothing to do.
         # The card and the library are both left untouched.
@@ -224,7 +220,6 @@ function Import-FromDrive {
         return $null
     }
 
-    $card = Get-CardIdentity -Root $Root -VolumeName $VolumeName
     if ($card.Vendor) {
         $desc = $card.Vendor
         if ($card.Model) { $desc += " $($card.Model)" }
@@ -269,7 +264,6 @@ function Import-FromDrive {
 
     # --- pass 2: assign profile, resolve capture date, build the plan --------
     $plan = New-Object Collections.ArrayList
-    $proxies = New-Object Collections.ArrayList
     $inv = [Globalization.CultureInfo]::InvariantCulture
 
     foreach ($f in $files) {
@@ -282,11 +276,6 @@ function Import-FromDrive {
             $who = 'unknown'
             if ($m -and $m.Make) { $who = $m.Make }
             Write-Log ("skip ({0}) {1}" -f $who, $f.FullName)
-            continue
-        }
-
-        if ($prof.ProxyExt -contains $ext) {
-            [void] $proxies.Add($f)         # handled after the real media lands
             continue
         }
 
@@ -303,14 +292,12 @@ function Import-FromDrive {
         if (-not $taken) { $taken = $f.LastWriteTime }
 
         $dir = Join-Path (Join-Path $prof.Root $taken.ToString('yyyy', $inv)) $taken.ToString('MMM-dd', $inv)
-        $set = $null
-        if ($prof.GroupSets -and -not $FlatGroups) {
-            $set = Get-GoProSet ([IO.Path]::GetFileNameWithoutExtension($f.Name))
-        }
-        # ScopeDir stays the day folder even after DestDir gains a set subfolder;
-        # duplicate detection searches the whole day, not just the exact target.
+        # Mirrored files keep their place in the card's tree (DCIM\100GOPRO\...);
+        # the day folder is fixed below, once the whole card has been seen.
+        $rel = $null
+        if ($prof.Mirror) { $rel = $f.DirectoryName.Substring($Root.TrimEnd('\').Length).TrimStart('\') }
         [void] $plan.Add([pscustomobject]@{
-                File = $f; Profile = $prof; DestDir = $dir; ScopeDir = $dir; Set = $set
+                File = $f; Profile = $prof; DestDir = $dir; ScopeDir = $dir; Rel = $rel; Taken = $taken
             })
     }
 
@@ -319,17 +306,16 @@ function Import-FromDrive {
         return $result
     }
 
-    # A set only earns its own subfolder when it actually has members to keep
-    # together; a lone file would just get a pointless one-file directory.
-    $setCount = @{}
-    foreach ($i in $plan) {
-        if (-not $i.Set) { continue }
-        $k = '{0}|{1}' -f $i.DestDir, $i.Set
-        if ($setCount.ContainsKey($k)) { $setCount[$k]++ } else { $setCount[$k] = 1 }
-    }
-    foreach ($i in $plan) {
-        if ($i.Set -and $setCount['{0}|{1}' -f $i.DestDir, $i.Set] -ge 2) {
-            $i.DestDir = Join-Path $i.DestDir $i.Set
+    # A mirrored card lands under ONE day folder -- the day of its earliest file
+    # -- so a time-lapse that runs past midnight is not cut in two. The card's
+    # own folder names and file names are reproduced untouched beneath it.
+    foreach ($prof in @($plan | Where-Object { $_.Profile.Mirror } | ForEach-Object { $_.Profile } | Sort-Object Name -Unique)) {
+        $mine = @($plan | Where-Object { $_.Profile.Name -eq $prof.Name })
+        $first = ($mine | ForEach-Object { $_.Taken } | Sort-Object | Select-Object -First 1)
+        $day = Join-Path (Join-Path $prof.Root $first.ToString('yyyy', $inv)) $first.ToString('MMM-dd', $inv)
+        foreach ($i in $mine) {
+            $i.DestDir = if ($i.Rel) { Join-Path $day $i.Rel } else { $day }
+            $i.ScopeDir = $i.DestDir      # same card path => same place; no day-wide search needed
         }
     }
 
@@ -398,25 +384,6 @@ function Import-FromDrive {
         }
     }
 
-    # --- proxies ------------------------------------------------------------
-    # Only once the real media is safely in the library and nothing failed.
-    if ($proxies.Count -gt 0) {
-        if ($KeepProxies -or $KeepOriginals) {
-            Write-Log ("left {0} proxy file(s) (.LRV/.THM) on the card" -f $proxies.Count)
-        }
-        elseif ($result.Errors -gt 0 -or $result.Imported -eq 0) {
-            Write-Log ("kept {0} proxy file(s): import did not complete cleanly" -f $proxies.Count) 'WARN'
-        }
-        else {
-            foreach ($p in $proxies) {
-                if (-not $PSCmdlet.ShouldProcess($p.FullName, 'Delete proxy')) { continue }
-                try { Remove-SourceFile $p.FullName; $result.ProxiesRemoved++ }
-                catch { Write-Log ("could not delete proxy {0}: {1}" -f $p.FullName, $_.Exception.Message) 'WARN' }
-            }
-            Write-Log ("deleted {0} proxy file(s) (.LRV/.THM) from the card" -f $result.ProxiesRemoved)
-        }
-    }
-
     return $result
 }
 
@@ -468,8 +435,8 @@ foreach ($s in $summaries) {
     $mb = [math]::Round($s.Bytes / 1MB, 1)
     $by = ($s.ByProfile.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ', '
     if (-not $by) { $by = 'none' }
-    Write-Log ("{0} done: {1} imported ({2}), {3} duplicate, {4} skipped, {5} error(s), {6} proxies removed -- {7} MB" -f `
-            $s.Drive, $s.Imported, $by, $s.Duplicates, $s.Skipped, $s.Errors, $s.ProxiesRemoved, $mb)
+    Write-Log ("{0} done: {1} imported ({2}), {3} duplicate, {4} skipped, {5} error(s) -- {6} MB" -f `
+            $s.Drive, $s.Imported, $by, $s.Duplicates, $s.Skipped, $s.Errors, $mb)
 
     if ($s.Imported -gt 0 -or $s.Errors -gt 0) {
         $title = 'Camera import'

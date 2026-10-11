@@ -20,8 +20,6 @@ param(
     [string] $CanonRoot = (Join-Path $env:USERPROFILE 'CameraImports\Canon'),
     [string] $GoProRoot = (Join-Path $env:USERPROFILE 'CameraImports\GoPro'),
     [switch] $KeepOriginals,
-    [switch] $KeepProxies,
-    [switch] $FlatGroups,
     [switch] $Eject,
     [switch] $Once,
     [switch] $Quiet,
@@ -132,8 +130,6 @@ function Invoke-Scan {
                 LogPath   = $LogPath
             }
             if ($KeepOriginals) { $splat.KeepOriginals = $true }
-            if ($KeepProxies) { $splat.KeepProxies = $true }
-            if ($FlatGroups) { $splat.FlatGroups = $true }
             if ($Eject) { $splat.Eject = $true }
             & $ImportScript @splat | Out-Null
         }

@@ -21,8 +21,6 @@ param(
     [string] $CanonRoot = (Join-Path $env:USERPROFILE 'CameraImports\Canon'),
     [string] $GoProRoot = (Join-Path $env:USERPROFILE 'CameraImports\GoPro'),
     [switch] $KeepOriginals,
-    [switch] $KeepProxies,
-    [switch] $FlatGroups,
     [switch] $Eject,
     [switch] $Uninstall
 )
@@ -79,8 +77,6 @@ if (Test-Path -LiteralPath $oldVbs) {
 $psArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -CanonRoot "{1}" -GoProRoot "{2}"' -f `
     $watcher, $CanonRoot.TrimEnd('\'), $GoProRoot.TrimEnd('\')
 if ($KeepOriginals) { $psArgs += ' -KeepOriginals' }
-if ($KeepProxies) { $psArgs += ' -KeepProxies' }
-if ($FlatGroups) { $psArgs += ' -FlatGroups' }
 if ($Eject) { $psArgs += ' -Eject' }
 
 # In VBScript a literal double quote inside a string is written as two quotes.

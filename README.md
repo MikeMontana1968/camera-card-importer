@@ -5,7 +5,7 @@ library folder. Nothing to click.
 
 ```
 Canon  ->  %USERPROFILE%\CameraImports\Canon\2026\Sep-10\
-GoPro  ->  %USERPROFILE%\CameraImports\GoPro\2026\Sep-06\G001\
+GoPro  ->  %USERPROFILE%\CameraImports\GoPro\2026\Sep-06\DCIM\100GOPRO\   (1:1 mirror of the card)
 ```
 
 It is a background watcher plus a verified-move engine, written in Windows
@@ -75,8 +75,6 @@ startup item) and `Import-CameraMedia.ps1` (one-off).
 | `-CanonRoot <path>` | Where Canon media goes. |
 | `-GoProRoot <path>` | Where GoPro media goes. |
 | `-KeepOriginals` | Copy instead of move; the card is not modified at all. |
-| `-FlatGroups` | Disable GoPro set subfolders; everything lands in the day folder. |
-| `-KeepProxies` | Keep `.LRV`/`.THM` proxies on the card instead of deleting them. |
 | `-Eject` | Eject the card after a clean import. |
 | `-Quiet` | No console output and no toasts; the log is still written. |
 
@@ -156,26 +154,24 @@ filed it under the wrong session, and on a late-evening shot, the wrong day.
 
 ---
 
-## GoPro set grouping
+## GoPro: a 1:1 mirror of the card
 
-A 556-frame time-lapse dumped straight into a day folder buries everything else,
-so GoPro media is grouped into a subfolder per set. The subtlety is that GoPro's
-`AABBCCCC` filename scheme means **different things by media type**:
+GoPro cards are not sorted, grouped or filtered. The card's `DCIM` tree is
+reproduced exactly, under a single day folder:
 
 ```
-G0 01 7264.JPG    grouped photo   BB is the group    ->  set G001
-GH 01 0123.MP4    video chapter   CCCC is the take   ->  set GH0123
-GH 02 0123.MP4    same take, chapter 2               ->  set GH0123
-GOPR1234.MP4      first chapter of an older GP set   ->  set GP1234
+D:\DCIM\100GOPRO\G0010001.JPG   ->   GoPro\2026\Sep-06\DCIM\100GOPRO\G0010001.JPG
+D:\DCIM\101GOPRO\GH010123.MP4   ->   GoPro\2026\Sep-06\DCIM\101GOPRO\GH010123.MP4
 ```
 
-Photos key on the **middle** digits, video keys on the **trailing** digits.
-Getting that backwards scatters the chapters of one recording, because a plain
-name sort orders `GH010123, GH010124, GH020123` — putting an unrelated take
-between chapter 1 and chapter 2 of the same recording.
+- **Every file under `DCIM` is taken**, whatever its extension or name -- including
+  `.LRV`/`.THM` proxies -- so nothing is left behind or deleted unseen.
+- **No regrouping.** Folder and file names are untouched; time-lapse frames and
+  video chapters stay exactly where the camera put them.
+- **One day folder per card**, named for the card's *earliest* capture time, so a
+  time-lapse that runs past midnight is not split across two days.
 
-A set only earns its own subfolder when at least two of its members are present
-in that day's import, so single shots stay flat. `-FlatGroups` turns it off.
+Canon cards still sort into one folder per capture day.
 
 ---
 
@@ -221,8 +217,8 @@ For each file:
 2. Re-hash the written file from disk.
 3. If the hashes differ, delete the temp file, log an error, and **leave the
    source alone**.
-4. Look for a byte-identical copy already in the library — searching the whole day
-   folder **and one level of set subfolders**, not just the exact target path.
+4. Look for a byte-identical copy already in the library — searching the target folder
+   (and one level of subfolders beneath it).
    A match means already imported: delete the source, count it as a duplicate.
    A file of the same name but different bytes at the target keeps both, with a
    `_1` suffix.
@@ -230,18 +226,6 @@ For each file:
 
 Re-inserting an already-imported card is therefore a safe no-op rather than a
 second copy.
-
-The day-folder scope matters because whether a file lands in a set subfolder
-depends on how many of its set-mates are in *that* import. The same photo can
-legitimately target `Sep-06\G001\X.JPG` on one run and `Sep-06\X.JPG` on another,
-so a check scoped to the exact destination path would miss the match and write a
-second copy.
-
-### Proxies
-
-GoPro writes `.LRV` (low-resolution proxy) and `.THM` (thumbnail) beside each
-clip. By default these are deleted from the card — but only after every real file
-imported cleanly with zero errors. Use `-KeepProxies` to leave them.
 
 ---
 
@@ -320,14 +304,12 @@ Vendors are table-driven. Add an entry to `$script:Profiles` in
     NamePattern = '^(DSC|_DSC)_?\d+$'           # for files with no metadata
     StillExt    = @('.jpg', '.nef')
     OtherExt    = @('.mov', '.mp4')
-    ProxyExt    = @()
-    GroupSets   = $false
+    Mirror      = $false                        # $true = copy the card's DCIM tree 1:1
 }
 ```
 
-Then add its root markers to `Get-CardIdentity` in `MediaLib.ps1`. `GroupSets`
-currently implies GoPro's naming scheme; a different grouping rule needs a
-matching helper alongside `Get-GoProSet`.
+Then add its root markers to `Get-CardIdentity` in `MediaLib.ps1`. `Mirror = $true`
+takes every file under `DCIM` and reproduces its folder layout, as GoPro does.
 
 ---
 
@@ -336,7 +318,7 @@ matching helper alongside `Get-GoProSet`.
 | Card | Result |
 |---|---|
 | Canon EOS 70D, 32 GB (`EOS_DIGITAL`) | 18 files / 251 MB → 3 date folders, 0 errors |
-| GoPro HERO6 Black, 64 GB | 830 files / 1.5 GB → 2 date folders → `G001`, 0 errors, 65 s |
+| GoPro HERO6 Black, 64 GB | 830 files / 1.5 GB → 2 date folders → `G001`, 0 errors, 65 s (pre-mirror layout) |
 | 8 GB card of 3D-printer gcode | ignored; nothing created, card byte-identical |
 
 The Canon card was the useful one: mixed `100CANON` / `213CANON` / `212CASIO` /
@@ -344,7 +326,7 @@ The Canon card was the useful one: mixed `100CANON` / `213CANON` / `212CASIO` /
 sync artifact, and file timestamps that disagreed with EXIF. Most of the rules
 above exist because of something that card did.
 
-The MP4 branch — `mvhd` dating, chapter grouping, proxy deletion — is implemented
+The MP4 branch — `mvhd` dating and the 1:1 mirror — is implemented
 and unit-exercised but has **not** yet been run against real GoPro video, only
 against stills. One open question for that first run: whether the HERO6 writes
 `mvhd` creation time as UTC or local, since a wrong assumption shifts
